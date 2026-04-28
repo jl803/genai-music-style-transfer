@@ -10,7 +10,7 @@ import soundfile as sf
 import torch
 
 from cycle_gan import Generator
-from reconstruction import mel_to_audio
+from reconstruct_wav import mel_to_audio
 from transfer_song import (
     ROOT,
     audio_to_normalized_mel,

@@ -55,7 +55,7 @@ def denormalize_mel(mel_norm: np.ndarray, assumed_max: float = 100.0) -> np.ndar
     return mel_norm * assumed_max
 
 
-def mel_to_audio(
+def mel_db_to_audio(
     mel_db: np.ndarray,
     sr: int = 22050,
     n_fft: int = 2048,
@@ -104,6 +104,37 @@ def mel_to_audio(
     return audio.astype(np.float32)
 
 
+def mel_to_audio(
+    mel_norm: np.ndarray,
+    *,
+    sr: int = 22050,
+    n_fft: int = 2048,
+    hop_length: int = 512,
+    n_mels: int = 128,
+    fmin: float = 0.0,
+    fmax: float | None = None,
+    n_iter: int = 64,
+    assumed_max: float = 100.0,
+) -> np.ndarray:
+    """Convert a normalized mel spectrogram in [0,1] to a waveform."""
+    if mel_norm.ndim != 2:
+        raise ValueError(
+            f"Expected 2-D mel array (n_mels, time), got shape {mel_norm.shape}."
+        )
+
+    mel_db = denormalize_mel(mel_norm, assumed_max=assumed_max)
+    return mel_db_to_audio(
+        mel_db,
+        sr=sr,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        n_mels=n_mels,
+        fmin=fmin,
+        fmax=fmax,
+        n_iter=n_iter,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -139,15 +170,8 @@ def reconstruct(
     wav_path = Path(wav_path)
 
     mel_norm = np.load(npy_path)  # shape: (n_mels, time_frames)
-
-    if mel_norm.ndim != 2:
-        raise ValueError(
-            f"Expected 2-D mel array (n_mels, time), got shape {mel_norm.shape}."
-        )
-
-    mel_db = denormalize_mel(mel_norm, assumed_max=assumed_max)
     audio = mel_to_audio(
-        mel_db,
+        mel_norm,
         sr=sr,
         n_fft=n_fft,
         hop_length=hop_length,
@@ -155,6 +179,7 @@ def reconstruct(
         fmin=fmin,
         fmax=fmax,
         n_iter=n_iter,
+        assumed_max=assumed_max,
     )
 
     wav_path.parent.mkdir(parents=True, exist_ok=True)
