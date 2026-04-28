@@ -18,6 +18,8 @@ Optional:
 
 - `--checkpoint checkpoints\cycle_gan_blues_jazz.pt`
 - `--save_mel`
+- `--hop_time 32`
+- `--assumed_max 100 --n_iter 64`
 
 ## `batch_transfer_songs.py`
 
@@ -29,9 +31,16 @@ Optional:
 
 - `--checkpoint checkpoints\cycle_gan_blues_jazz.pt`
 - `--save_mel`
+- `--hop_time 32`
+- `--assumed_max 100 --n_iter 64`
 
-## `mel_to_wav.py`
+## `reconstruct_wav.py`
 
 ```powershell
-python mel_to_wav.py --input outputs\mel_spectrograms\blues__blues.00000_mel_norm.npy --output outputs\blues_preview.wav
+python reconstruct_wav.py outputs\mel_spectrograms\blues__blues.00000_mel_norm.npy outputs\blues_preview.wav
 ```
+
+Optional:
+
+- `--assumed_max 100`
+- `--n_iter 64`
