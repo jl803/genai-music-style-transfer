@@ -22,6 +22,7 @@ import soundfile as sf
 import torch
 
 from cycle_gan import Generator
+from reconstruction import mel_to_audio
 
 ROOT = Path(__file__).resolve().parent
 
@@ -53,12 +54,29 @@ def run_generator_on_full_mel(
     generator: Generator,
     crop_time: int,
     device: torch.device,
+    hop_time: int,
 ) -> np.ndarray:
-    """Apply the generator to a full-length mel using non-overlapping chunks."""
+    """Apply the generator to a full-length mel using overlap-add chunk blending."""
     width = mel.shape[1]
-    chunks: list[np.ndarray] = []
+    if hop_time <= 0:
+        raise ValueError("hop_time must be positive.")
+    if hop_time > crop_time:
+        hop_time = crop_time
 
-    for start in range(0, width, crop_time):
+    starts = list(range(0, max(1, width - crop_time + 1), hop_time))
+    if not starts or starts[-1] != max(0, width - crop_time):
+        starts.append(max(0, width - crop_time))
+
+    out_sum = np.zeros((mel.shape[0], width), dtype=np.float32)
+    weight_sum = np.zeros((1, width), dtype=np.float32)
+    window = np.hanning(crop_time).astype(np.float32)
+    if crop_time == 1:
+        window[:] = 1.0
+    else:
+        window = np.maximum(window, 1e-3)
+    window_2d = window[None, :]
+
+    for start in starts:
         chunk = mel[:, start : start + crop_time]
         original_width = chunk.shape[1]
         if original_width < crop_time:
@@ -67,30 +85,14 @@ def run_generator_on_full_mel(
         tensor = torch.from_numpy(chunk).unsqueeze(0).unsqueeze(0).to(device).clamp(0.0, 1.0)
         with torch.no_grad():
             out = generator(tensor)[0, 0].cpu().numpy().astype(np.float32)
-        chunks.append(out[:, :original_width])
+        out = out[:, :original_width]
+        weight = window_2d[:, :original_width]
+        out_sum[:, start : start + original_width] += out * weight
+        weight_sum[:, start : start + original_width] += weight
 
-    if not chunks:
+    if np.all(weight_sum == 0.0):
         raise ValueError("Input mel had no time frames to process.")
-    return np.concatenate(chunks, axis=1)
-
-
-def mel_to_audio(
-    mel: np.ndarray,
-    griffin_lim_iters: int,
-    energy_scale: float,
-    power_exponent: float,
-) -> np.ndarray:
-    mel = np.clip(mel.astype(np.float32), 0.0, 1.0)
-    mel_power = np.power(mel, power_exponent) * energy_scale
-    return librosa.feature.inverse.mel_to_audio(
-        mel_power,
-        sr=SR,
-        n_fft=N_FFT,
-        hop_length=HOP_LENGTH,
-        win_length=N_FFT,
-        power=2.0,
-        n_iter=griffin_lim_iters,
-    )
+    return out_sum / np.maximum(weight_sum, 1e-6)
 
 
 def main() -> None:
@@ -129,9 +131,14 @@ def main() -> None:
         default=None,
         help="Optional path for the transferred mel .npy. If omitted, no .npy is saved.",
     )
-    ap.add_argument("--griffin_lim_iters", type=int, default=32)
-    ap.add_argument("--energy_scale", type=float, default=1000.0)
-    ap.add_argument("--power_exponent", type=float, default=2.0)
+    ap.add_argument("--assumed_max", type=float, default=100.0)
+    ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
+    ap.add_argument(
+        "--hop_time",
+        type=int,
+        default=None,
+        help="Chunk hop in mel frames for overlap-add inference. Defaults to crop_time // 2.",
+    )
     ap.add_argument(
         "--save_mel",
         action="store_true",
@@ -161,14 +168,16 @@ def main() -> None:
     generator.to(device)
     generator.eval()
 
+    hop_time = args.hop_time if args.hop_time is not None else max(1, crop_time // 2)
     input_mel = audio_to_normalized_mel(args.input_audio, n_mels=n_mels)
-    transferred_mel = run_generator_on_full_mel(input_mel, generator, crop_time=crop_time, device=device)
-    transferred_audio = mel_to_audio(
-        transferred_mel,
-        griffin_lim_iters=args.griffin_lim_iters,
-        energy_scale=args.energy_scale,
-        power_exponent=args.power_exponent,
+    transferred_mel = run_generator_on_full_mel(
+        input_mel,
+        generator,
+        crop_time=crop_time,
+        device=device,
+        hop_time=hop_time,
     )
+    transferred_audio = mel_to_audio(transferred_mel, assumed_max=args.assumed_max, n_iter=args.n_iter)
 
     direction_label = f"{genre_a}_to_{genre_b}" if args.direction == "a2b" else f"{genre_b}_to_{genre_a}"
     input_stem = args.input_audio.stem

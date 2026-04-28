@@ -10,10 +10,10 @@ import soundfile as sf
 import torch
 
 from cycle_gan import Generator
+from reconstruction import mel_to_audio
 from transfer_song import (
     ROOT,
     audio_to_normalized_mel,
-    mel_to_audio,
     run_generator_on_full_mel,
 )
 
@@ -50,9 +50,14 @@ def main() -> None:
         required=True,
         help="Directory where output wav files will be written.",
     )
-    ap.add_argument("--griffin_lim_iters", type=int, default=32)
-    ap.add_argument("--energy_scale", type=float, default=1000.0)
-    ap.add_argument("--power_exponent", type=float, default=2.0)
+    ap.add_argument("--assumed_max", type=float, default=100.0)
+    ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
+    ap.add_argument(
+        "--hop_time",
+        type=int,
+        default=None,
+        help="Chunk hop in mel frames for overlap-add inference. Defaults to crop_time // 2.",
+    )
     ap.add_argument("--save_mel", action="store_true", help="Also save transferred mel .npy files.")
     args = ap.parse_args()
 
@@ -83,6 +88,7 @@ def main() -> None:
     generator.load_state_dict(ckpt[key])
     generator.to(device)
     generator.eval()
+    hop_time = args.hop_time if args.hop_time is not None else max(1, crop_time // 2)
 
     audio_paths = [p for p in sorted(input_dir.rglob("*")) if p.is_file() and p.suffix.lower() in AUDIO_EXTS]
     if not audio_paths:
@@ -99,12 +105,17 @@ def main() -> None:
 
         try:
             input_mel = audio_to_normalized_mel(audio_path, n_mels=n_mels)
-            transferred_mel = run_generator_on_full_mel(input_mel, generator, crop_time=crop_time, device=device)
+            transferred_mel = run_generator_on_full_mel(
+                input_mel,
+                generator,
+                crop_time=crop_time,
+                device=device,
+                hop_time=hop_time,
+            )
             transferred_audio = mel_to_audio(
                 transferred_mel,
-                griffin_lim_iters=args.griffin_lim_iters,
-                energy_scale=args.energy_scale,
-                power_exponent=args.power_exponent,
+                assumed_max=args.assumed_max,
+                n_iter=args.n_iter,
             )
 
             sf.write(out_wav, transferred_audio, 22050)
