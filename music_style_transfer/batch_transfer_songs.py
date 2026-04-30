@@ -50,7 +50,13 @@ def main() -> None:
         required=True,
         help="Directory where output wav files will be written.",
     )
-    ap.add_argument("--assumed_max", type=float, default=100.0)
+    ap.add_argument("--assumed_max", type=float, default=1.0)
+    ap.add_argument(
+        "--mel_scale",
+        choices=("power", "db"),
+        default="power",
+        help="Use 'power' for preprocess_mel.py outputs, or 'db' for legacy reconstruction.",
+    )
     ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
     ap.add_argument(
         "--hop_time",
@@ -116,6 +122,7 @@ def main() -> None:
                 transferred_mel,
                 assumed_max=args.assumed_max,
                 n_iter=args.n_iter,
+                mel_scale=args.mel_scale,
             )
 
             sf.write(out_wav, transferred_audio, 22050)

@@ -131,7 +131,13 @@ def main() -> None:
         default=None,
         help="Optional path for the transferred mel .npy. If omitted, no .npy is saved.",
     )
-    ap.add_argument("--assumed_max", type=float, default=100.0)
+    ap.add_argument("--assumed_max", type=float, default=1.0)
+    ap.add_argument(
+        "--mel_scale",
+        choices=("power", "db"),
+        default="power",
+        help="Use 'power' for preprocess_mel.py outputs, or 'db' for legacy reconstruction.",
+    )
     ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
     ap.add_argument(
         "--hop_time",
@@ -177,7 +183,12 @@ def main() -> None:
         device=device,
         hop_time=hop_time,
     )
-    transferred_audio = mel_to_audio(transferred_mel, assumed_max=args.assumed_max, n_iter=args.n_iter)
+    transferred_audio = mel_to_audio(
+        transferred_mel,
+        assumed_max=args.assumed_max,
+        n_iter=args.n_iter,
+        mel_scale=args.mel_scale,
+    )
 
     direction_label = f"{genre_a}_to_{genre_b}" if args.direction == "a2b" else f"{genre_b}_to_{genre_a}"
     input_stem = args.input_audio.stem
