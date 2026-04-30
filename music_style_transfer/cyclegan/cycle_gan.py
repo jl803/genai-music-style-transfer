@@ -77,6 +77,7 @@ class Discriminator(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+
         def conv(in_c: int, out_c: int, stride: int, norm: bool) -> nn.Module:
             layers: list[nn.Module] = [nn.Conv2d(in_c, out_c, kernel_size=4, stride=stride, padding=1)]
             if norm:

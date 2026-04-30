@@ -1,19 +1,9 @@
-"""End-to-end music style transfer for one song.
-
-Pipeline:
-1. Load an input audio file
-2. Convert it to the normalized mel format used by this project
-3. Run the trained CycleGAN generator on sliding time chunks
-4. Reconstruct an approximate waveform with Griffin-Lim
-5. Save both the transferred mel and the output wav
-
-This is designed to work with the checkpoint format produced by
-train_cycle_gan.py in this repository.
-"""
+"""End-to-end music style transfer for one song using CycleGAN."""
 
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import librosa
@@ -21,10 +11,12 @@ import numpy as np
 import soundfile as sf
 import torch
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from cycle_gan import Generator
 from reconstruct_wav import mel_to_audio
-
-ROOT = Path(__file__).resolve().parent
 
 SR = 22050
 N_FFT = 2048
@@ -96,60 +88,17 @@ def run_generator_on_full_mel(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run end-to-end music style transfer for one audio file.")
-    ap.add_argument(
-        "--input",
-        "--input_audio",
-        dest="input_audio",
-        type=Path,
-        required=True,
-        help="Path to the source audio file.",
-    )
-    ap.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=ROOT / "checkpoints" / "cycle_gan.pt",
-        help="Path to a checkpoint from train_cycle_gan.py",
-    )
-    ap.add_argument(
-        "--direction",
-        choices=("a2b", "b2a"),
-        required=True,
-        help="Use the generator that maps genre_a -> genre_b or genre_b -> genre_a.",
-    )
-    ap.add_argument(
-        "--output",
-        "--output_dir",
-        dest="output",
-        type=Path,
-        required=True,
-        help="Output directory or a specific output .wav path.",
-    )
-    ap.add_argument(
-        "--output_mel",
-        type=Path,
-        default=None,
-        help="Optional path for the transferred mel .npy. If omitted, no .npy is saved.",
-    )
+    ap = argparse.ArgumentParser(description="Run CycleGAN music style transfer for one audio file.")
+    ap.add_argument("--input", "--input_audio", dest="input_audio", type=Path, required=True)
+    ap.add_argument("--checkpoint", type=Path, default=ROOT / "checkpoints" / "cycle_gan.pt")
+    ap.add_argument("--direction", choices=("a2b", "b2a"), required=True)
+    ap.add_argument("--output", "--output_dir", dest="output", type=Path, required=True)
+    ap.add_argument("--output_mel", type=Path, default=None)
     ap.add_argument("--assumed_max", type=float, default=1.0)
-    ap.add_argument(
-        "--mel_scale",
-        choices=("power", "db"),
-        default="power",
-        help="Use 'power' for preprocess_mel.py outputs, or 'db' for legacy reconstruction.",
-    )
+    ap.add_argument("--mel_scale", choices=("power", "db"), default="power")
     ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
-    ap.add_argument(
-        "--hop_time",
-        type=int,
-        default=None,
-        help="Chunk hop in mel frames for overlap-add inference. Defaults to crop_time // 2.",
-    )
-    ap.add_argument(
-        "--save_mel",
-        action="store_true",
-        help="Also save the transferred mel spectrogram as a .npy file inside output_dir.",
-    )
+    ap.add_argument("--hop_time", type=int, default=None)
+    ap.add_argument("--save_mel", action="store_true")
     args = ap.parse_args()
 
     try:
@@ -162,11 +111,9 @@ def main() -> None:
     genre_a = ckpt.get("genre_a", "genre_a")
     genre_b = ckpt.get("genre_b", "genre_b")
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
         print("CUDA not available, using CPU.")
-        device = torch.device("cpu")
 
     generator = Generator(n_mels, crop_time)
     key = "G_AB" if args.direction == "a2b" else "G_BA"
@@ -176,13 +123,7 @@ def main() -> None:
 
     hop_time = args.hop_time if args.hop_time is not None else max(1, crop_time // 2)
     input_mel = audio_to_normalized_mel(args.input_audio, n_mels=n_mels)
-    transferred_mel = run_generator_on_full_mel(
-        input_mel,
-        generator,
-        crop_time=crop_time,
-        device=device,
-        hop_time=hop_time,
-    )
+    transferred_mel = run_generator_on_full_mel(input_mel, generator, crop_time, device, hop_time)
     transferred_audio = mel_to_audio(
         transferred_mel,
         assumed_max=args.assumed_max,
@@ -198,11 +139,9 @@ def main() -> None:
         output_is_dir = True
 
     if output_is_dir:
-        output_dir = output_target
-        output_wav = output_dir / f"{input_stem}_{direction_label}.wav"
+        output_wav = output_target / f"{input_stem}_{direction_label}.wav"
     else:
         output_wav = output_target
-        output_dir = output_wav.parent
 
     output_mel = args.output_mel
     if output_mel is None and args.save_mel:
@@ -211,8 +150,6 @@ def main() -> None:
     output_wav.parent.mkdir(parents=True, exist_ok=True)
     if output_mel is not None:
         output_mel.parent.mkdir(parents=True, exist_ok=True)
-
-    if output_mel is not None:
         np.save(output_mel, transferred_mel.astype(np.float32))
     sf.write(output_wav, transferred_audio, SR)
 

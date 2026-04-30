@@ -2,7 +2,7 @@
 Train a two-genre CycleGAN on *_mel_norm.npy files (shape n_mels x time, values in [0,1]).
 
 Example:
-  python train_cycle_gan.py --genre_a blues --genre_b jazz --epochs 100
+  python cyclegan\train_cycle_gan.py --genre_a blues --genre_b jazz --epochs 100
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from cycle_gan import Discriminator, Generator
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MEL_DIR = ROOT / "outputs" / "mel_spectrograms"
 
 
@@ -171,7 +171,6 @@ def main() -> None:
             loss_g.backward()
             opt_G.step()
 
-            # --- Discriminators ---
             opt_D.zero_grad(set_to_none=True)
             loss_d_a = loss_gan(D_A(real_a), torch.ones_like(D_A(real_a)))
             loss_d_a += loss_gan(D_A(fake_a.detach()), torch.zeros_like(D_A(fake_a)))

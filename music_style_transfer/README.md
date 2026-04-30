@@ -1,17 +1,17 @@
 # Script Usage
 
-## `transfer_song.py`
+## CycleGAN scripts
 
 Auto-name the output inside a folder:
 
 ```powershell
-python transfer_song.py --input "C:\path\to\song.wav" --direction a2b --output outputs
+python cyclegan\transfer_song.py --input "C:\path\to\song.wav" --direction a2b --output outputs
 ```
 
 Choose the exact output wav path:
 
 ```powershell
-python transfer_song.py --input "C:\path\to\song.wav" --direction a2b --output outputs\my_result.wav
+python cyclegan\transfer_song.py --input "C:\path\to\song.wav" --direction a2b --output outputs\my_result.wav
 ```
 
 Optional:
@@ -22,10 +22,10 @@ Optional:
 - `--assumed_max 1 --n_iter 64`
 - `--mel_scale power`
 
-## `batch_transfer_songs.py`
+Batch transfer:
 
 ```powershell
-python batch_transfer_songs.py --input "C:\path\to\folder" --direction a2b --output outputs\batch
+python cyclegan\batch_transfer_songs.py --input "C:\path\to\folder" --direction a2b --output outputs\batch
 ```
 
 Optional:
@@ -47,6 +47,28 @@ Optional:
 - `--assumed_max 1`
 - `--mel_scale power`
 - `--n_iter 64`
+
+## Glow model experiment
+
+Train a conditional Glow model for blues to jazz:
+
+```powershell
+python glow\train_glow.py --genre_a blues --genre_b jazz --epochs 100 --batch_size 8
+```
+
+Run wav-to-wav transfer with the trained Glow checkpoint:
+
+```powershell
+python glow\transfer_glow.py --input "C:\path\to\blues_song.wav" --direction a2b --output outputs --save_mel
+```
+
+Optional:
+
+- `--checkpoint checkpoints\glow_blues_jazz.pt`
+- `--contrast_weight 0.5 --contrast_margin 0.05`
+- `--content_blend 0.25`
+- `--hop_time 64`
+- `--assumed_max 1 --n_iter 64`
 
 ## Classifier-guided transfer experiment
 

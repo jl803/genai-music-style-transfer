@@ -10,61 +10,23 @@ import soundfile as sf
 import torch
 
 from cycle_gan import Generator
+from transfer_song import ROOT, audio_to_normalized_mel, run_generator_on_full_mel
 from reconstruct_wav import mel_to_audio
-from transfer_song import (
-    ROOT,
-    audio_to_normalized_mel,
-    run_generator_on_full_mel,
-)
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg"}
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run end-to-end style transfer for all audio files in a directory.")
-    ap.add_argument(
-        "--input",
-        "--input_dir",
-        dest="input_dir",
-        type=Path,
-        required=True,
-        help="Directory containing source audio files.",
-    )
-    ap.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=ROOT / "checkpoints" / "cycle_gan.pt",
-        help="Path to a checkpoint from train_cycle_gan.py",
-    )
-    ap.add_argument(
-        "--direction",
-        choices=("a2b", "b2a"),
-        required=True,
-        help="Use the generator that maps genre_a -> genre_b or genre_b -> genre_a.",
-    )
-    ap.add_argument(
-        "--output",
-        "--output_dir",
-        dest="output_dir",
-        type=Path,
-        required=True,
-        help="Directory where output wav files will be written.",
-    )
+    ap = argparse.ArgumentParser(description="Run CycleGAN style transfer for all audio files in a directory.")
+    ap.add_argument("--input", "--input_dir", dest="input_dir", type=Path, required=True)
+    ap.add_argument("--checkpoint", type=Path, default=ROOT / "checkpoints" / "cycle_gan.pt")
+    ap.add_argument("--direction", choices=("a2b", "b2a"), required=True)
+    ap.add_argument("--output", "--output_dir", dest="output_dir", type=Path, required=True)
     ap.add_argument("--assumed_max", type=float, default=1.0)
-    ap.add_argument(
-        "--mel_scale",
-        choices=("power", "db"),
-        default="power",
-        help="Use 'power' for preprocess_mel.py outputs, or 'db' for legacy reconstruction.",
-    )
+    ap.add_argument("--mel_scale", choices=("power", "db"), default="power")
     ap.add_argument("--n_iter", "--griffin_lim_iters", type=int, default=64)
-    ap.add_argument(
-        "--hop_time",
-        type=int,
-        default=None,
-        help="Chunk hop in mel frames for overlap-add inference. Defaults to crop_time // 2.",
-    )
-    ap.add_argument("--save_mel", action="store_true", help="Also save transferred mel .npy files.")
+    ap.add_argument("--hop_time", type=int, default=None)
+    ap.add_argument("--save_mel", action="store_true")
     args = ap.parse_args()
 
     input_dir = args.input_dir.resolve()
@@ -83,11 +45,9 @@ def main() -> None:
     genre_b = ckpt.get("genre_b", "genre_b")
     direction_label = f"{genre_a}_to_{genre_b}" if args.direction == "a2b" else f"{genre_b}_to_{genre_a}"
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cpu":
         print("CUDA not available, using CPU.")
-        device = torch.device("cpu")
 
     generator = Generator(n_mels, crop_time)
     key = "G_AB" if args.direction == "a2b" else "G_BA"
@@ -127,8 +87,7 @@ def main() -> None:
 
             sf.write(out_wav, transferred_audio, 22050)
             if args.save_mel:
-                out_mel = out_wav.with_suffix(".npy")
-                np.save(out_mel, transferred_mel.astype(np.float32))
+                np.save(out_wav.with_suffix(".npy"), transferred_mel.astype(np.float32))
 
             converted += 1
             if converted == 1 or converted % 10 == 0:
