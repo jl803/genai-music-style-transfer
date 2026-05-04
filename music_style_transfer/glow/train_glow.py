@@ -7,6 +7,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 from pathlib import Path
 
@@ -39,18 +40,25 @@ def list_npy_for_genre(mel_dir: Path, genre: str) -> list[Path]:
 
 
 class LabeledMelCropDataset(Dataset):
-    """Loads random crops of shape [1, n_mels, crop_time] with genre labels."""
+    """Loads many random crops of shape [1, n_mels, crop_time] with genre labels."""
 
-    def __init__(self, items: list[tuple[Path, int]], n_mels: int, crop_time: int) -> None:
+    def __init__(
+        self,
+        items: list[tuple[Path, int]],
+        n_mels: int,
+        crop_time: int,
+        chunks_per_file: int,
+    ) -> None:
         self.items = items
         self.n_mels = n_mels
         self.crop_time = crop_time
+        self.chunks_per_file = max(1, chunks_per_file)
 
     def __len__(self) -> int:
-        return len(self.items)
+        return len(self.items) * self.chunks_per_file
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        path, label = self.items[idx]
+        path, label = self.items[idx % len(self.items)]
         mel = np.load(path).astype(np.float32)
         if mel.ndim != 2:
             raise ValueError(f"Expected 2-D mel in {path}, got {mel.shape}.")
@@ -78,6 +86,21 @@ def choose_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
+def save_checkpoint_safely(payload: dict, checkpoint: Path) -> Path:
+    """Save through a temp file so Windows does not leave partial checkpoints."""
+    tmp_path = checkpoint.with_name(f"{checkpoint.stem}.tmp.{os.getpid()}{checkpoint.suffix}")
+    torch.save(payload, tmp_path)
+    try:
+        tmp_path.replace(checkpoint)
+        return checkpoint
+    except OSError as exc:
+        epoch = payload.get("epoch", "latest")
+        fallback = checkpoint.with_name(f"{checkpoint.stem}_epoch{epoch}{checkpoint.suffix}")
+        tmp_path.replace(fallback)
+        print(f"Could not replace {checkpoint} ({exc}). Saved fallback checkpoint: {fallback}")
+        return fallback
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Train conditional Glow on two genres of normalized mel .npy files.",
@@ -91,13 +114,32 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--n_mels", type=int, default=128)
     parser.add_argument("--crop_time", type=int, default=128)
+    parser.add_argument(
+        "--chunks_per_file",
+        type=int,
+        default=12,
+        help="Random mel chunks sampled from each song per epoch.",
+    )
     parser.add_argument("--limit_per_genre", type=int, default=None, help="Optional quick-test cap per genre.")
     parser.add_argument("--steps_per_epoch", type=int, default=None, help="Optional quick-test batch cap per epoch.")
-    parser.add_argument("--n_flows", type=int, default=8)
-    parser.add_argument("--hidden_channels", type=int, default=64)
-    parser.add_argument("--cond_channels", type=int, default=16)
-    parser.add_argument("--contrast_weight", type=float, default=0.5)
-    parser.add_argument("--contrast_margin", type=float, default=0.05)
+    parser.add_argument("--n_flows", type=int, default=12)
+    parser.add_argument("--hidden_channels", type=int, default=128)
+    parser.add_argument("--cond_channels", type=int, default=32)
+    parser.add_argument("--contrast_weight", type=float, default=1.0)
+    parser.add_argument("--contrast_margin", type=float, default=0.5)
+    parser.add_argument(
+        "--classifier_checkpoint",
+        type=Path,
+        default=None,
+        help="Optional pre-trained genre classifier checkpoint. When provided, adds a "
+             "translation loss: translate x to the other genre and penalize misclassification.",
+    )
+    parser.add_argument(
+        "--classifier_weight",
+        type=float,
+        default=1.0,
+        help="Weight for the classifier-guided translation loss.",
+    )
     parser.add_argument("--grad_clip", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -125,7 +167,7 @@ def main() -> None:
         paths_b = paths_b[: args.limit_per_genre]
 
     items = [(path, 0) for path in paths_a] + [(path, 1) for path in paths_b]
-    dataset = LabeledMelCropDataset(items, args.n_mels, args.crop_time)
+    dataset = LabeledMelCropDataset(items, args.n_mels, args.crop_time, args.chunks_per_file)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
 
     device = choose_device(args.device)
@@ -139,6 +181,15 @@ def main() -> None:
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    classifier = None
+    if args.classifier_checkpoint is not None:
+        from genre_classifier import load_classifier_checkpoint
+        classifier, _ = load_classifier_checkpoint(args.classifier_checkpoint, device)
+        classifier.eval()
+        for p in classifier.parameters():
+            p.requires_grad_(False)
+        print(f"Loaded classifier: {args.classifier_checkpoint}")
+
     checkpoint = args.checkpoint
     if checkpoint is None:
         checkpoint = ROOT / "checkpoints" / f"glow_{args.genre_a}_{args.genre_b}.pt"
@@ -146,11 +197,16 @@ def main() -> None:
 
     print(f"Training Glow on {device}.")
     print(f"{args.genre_a}: {len(paths_a)} files | {args.genre_b}: {len(paths_b)} files")
+    print(f"Training chunks per epoch: {len(dataset)} ({args.chunks_per_file} chunks/file)")
     print(f"Checkpoint: {checkpoint}")
 
+    loss_history: list[float] = []
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
+        total_nll = 0.0
+        total_contrast = 0.0
+        total_translation = 0.0
         batches = 0
 
         for batch_idx, (x, labels) in enumerate(loader, start=1):
@@ -162,7 +218,23 @@ def main() -> None:
             correct_nll = glow_nll_per_sample(model, x, labels)
             wrong_nll = glow_nll_per_sample(model, x, wrong_labels)
             contrast_loss = F.softplus(args.contrast_margin + correct_nll - wrong_nll).mean()
-            loss = correct_nll.mean() + args.contrast_weight * contrast_loss
+
+            # Classifier-guided translation loss: translate x to the other genre and
+            # penalize when the frozen classifier doesn't recognise the output as target.
+            # This directly rewards the model for producing convincing translations.
+            if classifier is not None:
+                with torch.no_grad():
+                    z_src, _ = model.encode(x, labels)
+                x_transfer = model.decode(z_src, wrong_labels)
+                translation_loss = F.cross_entropy(classifier(x_transfer), wrong_labels)
+            else:
+                translation_loss = x.new_zeros(1).squeeze()
+
+            loss = (
+                correct_nll.mean()
+                + args.contrast_weight * contrast_loss
+                + args.classifier_weight * translation_loss
+            )
             if not torch.isfinite(loss):
                 print("Skipping non-finite loss batch.")
                 continue
@@ -171,27 +243,41 @@ def main() -> None:
             optimizer.step()
 
             total_loss += float(loss.detach())
+            total_nll += float(correct_nll.mean().detach())
+            total_contrast += float(contrast_loss.detach())
+            total_translation += float(translation_loss.detach())
             batches += 1
             if args.steps_per_epoch is not None and batch_idx >= args.steps_per_epoch:
                 break
 
         avg_loss = total_loss / max(1, batches)
-        print(f"epoch {epoch}/{args.epochs}  nll_per_dim={avg_loss:.5f}")
+        avg_nll = total_nll / max(1, batches)
+        avg_contrast = total_contrast / max(1, batches)
+        avg_translation = total_translation / max(1, batches)
+        loss_history.append(avg_loss)
+        print(
+            f"epoch {epoch}/{args.epochs}  "
+            f"loss={avg_loss:.4f}  nll={avg_nll:.4f}  "
+            f"contrast={avg_contrast:.4f}  translation={avg_translation:.4f}"
+        )
 
-        torch.save(
+        save_checkpoint_safely(
             {
                 "model": model.state_dict(),
                 "genre_a": args.genre_a,
                 "genre_b": args.genre_b,
                 "n_mels": args.n_mels,
                 "crop_time": args.crop_time,
+                "chunks_per_file": args.chunks_per_file,
                 "n_flows": args.n_flows,
                 "hidden_channels": args.hidden_channels,
                 "cond_channels": args.cond_channels,
                 "contrast_weight": args.contrast_weight,
                 "contrast_margin": args.contrast_margin,
+                "classifier_weight": args.classifier_weight,
                 "epoch": epoch,
                 "loss": avg_loss,
+                "loss_history": loss_history,
             },
             checkpoint,
         )
