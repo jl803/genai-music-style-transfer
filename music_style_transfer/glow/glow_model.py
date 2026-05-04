@@ -7,6 +7,14 @@ It learns a class-conditional invertible mapping:
 
 For style transfer, encode with the source genre label and decode the same
 latent with the target genre label.
+
+Key architectural choices vs. a vanilla Glow:
+- ConditionalActNorm: per-class normalization statistics at every flow step.
+  This directly creates genre-separated latent spaces — encoding blues with
+  label 0 vs. metal with label 1 uses different bias/scale at every layer,
+  so the same latent z decodes to genuinely different-sounding mel crops
+  depending on the label passed to decode().
+- AffineCoupling: class-conditional shift/scale via genre embedding.
 """
 
 from __future__ import annotations
@@ -38,35 +46,45 @@ def unsqueeze2d(x: torch.Tensor) -> torch.Tensor:
     return x.view(batch, channels // 4, height * 2, width * 2)
 
 
-class ActNorm(nn.Module):
-    """Activation normalization with data-dependent initialization."""
+class ConditionalActNorm(nn.Module):
+    """Per-class activation normalization.
 
-    def __init__(self, channels: int) -> None:
+    Unlike standard ActNorm (shared statistics for all inputs), this keeps
+    separate bias and log-scale for each genre class.  This is the key
+    architectural change that makes encode-with-A / decode-with-B produce
+    a genuinely different reconstruction rather than just adding noise.
+    """
+
+    def __init__(self, channels: int, num_classes: int = 2) -> None:
         super().__init__()
-        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        self.log_scale = nn.Parameter(torch.zeros(1, channels, 1, 1))
-        self.register_buffer("initialized", torch.tensor(False))
+        # [num_classes, channels, 1, 1] — one set of stats per genre
+        self.bias = nn.Parameter(torch.zeros(num_classes, channels, 1, 1))
+        self.log_scale = nn.Parameter(torch.zeros(num_classes, channels, 1, 1))
+        self.register_buffer("initialized", torch.zeros(num_classes, dtype=torch.bool))
 
-    def initialize(self, x: torch.Tensor) -> None:
+    def _init_class(self, x_cls: torch.Tensor, cls_idx: int) -> None:
         with torch.no_grad():
-            mean = x.mean(dim=(0, 2, 3), keepdim=True)
-            std = x.std(dim=(0, 2, 3), keepdim=True).clamp_min(1e-6)
-            self.bias.copy_(-mean)
-            self.log_scale.copy_(torch.log(1.0 / std))
-            self.initialized.fill_(True)
+            mean = x_cls.mean(dim=(0, 2, 3))          # [C]
+            std = x_cls.std(dim=(0, 2, 3)).clamp_min(1e-6)
+            self.bias.data[cls_idx, :, 0, 0] = -mean
+            self.log_scale.data[cls_idx, :, 0, 0] = torch.log(1.0 / std)
+            self.initialized[cls_idx] = True
 
-    def forward(self, x: torch.Tensor, reverse: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-        if not bool(self.initialized):
-            self.initialize(x)
+    def forward(
+        self, x: torch.Tensor, labels: torch.Tensor, reverse: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        for cls_idx in labels.unique():
+            if not bool(self.initialized[cls_idx]):
+                self._init_class(x[labels == cls_idx], int(cls_idx))
 
-        _, _, height, width = x.shape
-        logdet = height * width * self.log_scale.sum()
+        bias = self.bias[labels]           # [B, C, 1, 1]
+        log_scale = self.log_scale[labels] # [B, C, 1, 1]
+        _, _, H, W = x.shape
+        logdet = H * W * log_scale.sum(dim=(1, 2, 3))  # [B]
+
         if reverse:
-            y = x * torch.exp(-self.log_scale) - self.bias
-            return y, -logdet.expand(x.shape[0])
-
-        y = (x + self.bias) * torch.exp(self.log_scale)
-        return y, logdet.expand(x.shape[0])
+            return x * torch.exp(-log_scale) - bias, -logdet
+        return (x + bias) * torch.exp(log_scale), logdet
 
 
 class Invertible1x1Conv(nn.Module):
@@ -153,7 +171,7 @@ class FlowStep(nn.Module):
         num_classes: int,
     ) -> None:
         super().__init__()
-        self.actnorm = ActNorm(channels)
+        self.actnorm = ConditionalActNorm(channels, num_classes)
         self.invconv = Invertible1x1Conv(channels)
         self.coupling = AffineCoupling(channels, hidden_channels, cond_channels, num_classes)
 
@@ -164,16 +182,22 @@ class FlowStep(nn.Module):
         reverse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         total_logdet = x.new_zeros(x.shape[0])
-        layers = (self.actnorm, self.invconv, self.coupling)
-        if reverse:
-            layers = tuple(reversed(layers))
 
-        for layer in layers:
-            if isinstance(layer, AffineCoupling):
-                x, logdet = layer(x, labels, reverse=reverse)
-            else:
-                x, logdet = layer(x, reverse=reverse)
-            total_logdet = total_logdet + logdet
+        if reverse:
+            x, ld = self.coupling(x, labels, reverse=True)
+            total_logdet = total_logdet + ld
+            x, ld = self.invconv(x, reverse=True)
+            total_logdet = total_logdet + ld
+            x, ld = self.actnorm(x, labels, reverse=True)
+            total_logdet = total_logdet + ld
+        else:
+            x, ld = self.actnorm(x, labels)
+            total_logdet = total_logdet + ld
+            x, ld = self.invconv(x)
+            total_logdet = total_logdet + ld
+            x, ld = self.coupling(x, labels)
+            total_logdet = total_logdet + ld
+
         return x, total_logdet
 
 
@@ -182,9 +206,9 @@ class ConditionalGlow(nn.Module):
         self,
         n_mels: int = 128,
         time_len: int = 128,
-        n_flows: int = 8,
-        hidden_channels: int = 64,
-        cond_channels: int = 16,
+        n_flows: int = 12,
+        hidden_channels: int = 128,
+        cond_channels: int = 32,
         num_classes: int = 2,
         logit_eps: float = 1e-5,
     ) -> None:

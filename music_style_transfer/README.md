@@ -71,3 +71,11 @@ python glow\transfer_latent_optimization.py --input "C:\path\to\blues_song.wav" 
 ```
 
 This optimizes each Glow latent chunk toward the target genre classifier while keeping the generated mel close to the original song.
+
+Run reference-guided Glow timbre transfer:
+
+```powershell
+python glow\transfer_reference_timbre.py --input "C:\path\to\blues_song.wav" --style "C:\path\to\jazz_reference.wav" --checkpoint checkpoints\glow_blues_jazz.pt --direction a2b --output outputs
+```
+
+This uses a target reference song to guide the generated mel toward the reference's spectral/timbre texture while preserving the input song's structure.
